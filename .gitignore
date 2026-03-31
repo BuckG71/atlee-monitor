@@ -3,4 +3,6 @@ __pycache__/
 .env
 discovered_apis.json
 page_text_*.txt
+last_state.json
+.state/
 EOF

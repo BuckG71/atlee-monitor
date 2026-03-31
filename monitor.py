@@ -29,7 +29,8 @@ import requests
 
 KNOCK_API_URL = "https://doorway-api.knockrentals.com/v1/property/2017939/units"
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_state.json")
+STATE_DIR = os.environ.get("STATE_DIR", os.path.dirname(os.path.abspath(__file__)))
+STATE_FILE = os.path.join(STATE_DIR, "last_state.json")
 TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_START = 7   # 7am CT
 BUSINESS_END = 21    # 9pm CT
