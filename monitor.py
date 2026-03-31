@@ -24,6 +24,9 @@ from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -189,4 +192,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--test" in sys.argv:
+        print("Sending test SMS...")
+        send_sms(
+            "Success! You will now receive a text message from Bryan's "
+            "email address whenever a 2BR apartment becomes available at The Atlee."
+        )
+        print("Done.")
+    else:
+        main()
