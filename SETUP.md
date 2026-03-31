@@ -1,6 +1,6 @@
 # The Atlee 2BR Availability Monitor — Setup Guide
 
-This automation checks theatlee.com every 5 minutes during business hours (7am–9pm CT) for new 2-bedroom apartments and texts you when one appears.
+This automation checks every 5 minutes during business hours (7am-9pm CT) for new 2-bedroom apartments at The Atlee and texts you when one appears. It calls the Knock CRM API directly — no browser or scraping needed.
 
 ---
 
@@ -30,7 +30,7 @@ Gmail won't let you send via SMTP with your regular password. You need an "App P
 
 1. Go to https://github.com/new
 2. Name it something like `atlee-monitor`
-3. Set it to **Public** (free unlimited Actions minutes) or **Private** (2,000 free minutes/month — this uses ~700/month)
+3. Set it to **Public** (free unlimited Actions minutes) or **Private** (2,000 free minutes/month — this uses ~100/month)
 4. Click **Create repository**
 5. Upload ALL the files from this folder, preserving the directory structure:
    ```
@@ -38,7 +38,6 @@ Gmail won't let you send via SMTP with your regular password. You need an "App P
    ├── .github/
    │   └── workflows/
    │       └── monitor.yml
-   ├── discover.py
    ├── monitor.py
    ├── requirements.txt
    ├── last_state.json
@@ -83,25 +82,20 @@ The workflow needs to commit state changes back to the repo:
 
 ---
 
-## Step 5: Run the Discovery Script (Recommended First)
+## Step 5: Test Locally (Optional)
 
-Before relying on the automated monitor, run the discovery script locally to verify the API works:
+You can run the monitor locally first to verify it works:
 
 ```bash
-# Install dependencies
-pip install playwright beautifulsoup4
-playwright install chromium
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests
 
-# Run discovery
-python discover.py
+# Dry run (no SMS — secrets aren't set)
+python monitor.py
 ```
 
-This will:
-- Load the actual apartment pages in a headless browser
-- Capture all API calls the site makes
-- Save results to `discovered_apis.json`
-
-Share that file with me and I can fine-tune the monitor's parsing logic for the exact data format.
+You should see output listing any currently available 2BR units.
 
 ---
 
@@ -113,8 +107,8 @@ Share that file with me and I can fine-tune the monitor's parsing logic for the 
 4. Click the workflow name → **Run workflow** → **Run workflow** to trigger a manual test
 
 Check the run output to verify it:
-- Loads the pages successfully
-- Finds (or correctly reports zero) available units
+- Calls the API successfully
+- Finds (or correctly reports zero) available 2BR units
 - On the first run, it saves baseline state without sending SMS
 
 ---
@@ -122,8 +116,9 @@ Check the run output to verify it:
 ## How It Works
 
 - **Every 5 minutes**, GitHub Actions triggers the workflow
-- The Python script checks if it's between **7am–9pm Central Time** — if not, it exits immediately (costs ~0 Actions minutes)
-- During business hours, it launches a headless browser, loads both the Brookhurst and Grandview floor plan pages, and intercepts the API responses
+- The Python script checks if it's between **7am-9pm Central Time** — if not, it exits immediately (~0 Actions minutes)
+- During business hours, it calls the Knock CRM API (`doorway-api.knockrentals.com`) which is the same API that powers the theatlee.com availability page
+- It filters for 2-bedroom units where `available == true`
 - It compares found units against `last_state.json` (the previously known availability)
 - **Only when NEW units appear** does it send an SMS — no spam for unchanged availability
 - State is committed back to the repo so it persists between runs
@@ -132,7 +127,7 @@ Check the run output to verify it:
 
 ## Costs
 
-- **GitHub Actions**: Free for public repos. Private repos: ~700 min/month of the 2,000 free minutes
+- **GitHub Actions**: Free for public repos. Private repos: ~100 min/month of the 2,000 free minutes
 - **SMS**: Free via Verizon's email-to-SMS gateway (`number@vtext.com`)
 - **Gmail SMTP**: Free
 
@@ -153,9 +148,9 @@ Check the run output to verify it:
 - The cron schedule can take a few minutes to start after first push
 - GitHub may delay scheduled runs by up to a few minutes during high load
 
-**Monitor finds 0 units when the website shows some:**
-- The HTML parsing may need adjustment for the site's specific DOM structure
-- Run `discover.py` locally and share the output so I can tune the selectors
+**Monitor finds 0 units but website shows some:**
+- The Knock API may be temporarily down — check again in a few minutes
+- Run `python monitor.py` locally to see the raw output
 
 **Want to stop the monitor:**
 - Go to Actions → workflow → click the `...` menu → **Disable workflow**

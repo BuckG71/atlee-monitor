@@ -2,9 +2,10 @@
 """
 The Atlee 2BR Availability Monitor
 
-Checks theatlee.com for 2-bedroom apartment availability every 5 minutes
-during business hours (7am-9pm CT). Sends SMS alerts via Gmail SMTP →
-Verizon email-to-SMS gateway ONLY when new units appear.
+Checks the Knock CRM API for 2-bedroom apartment availability at The Atlee
+(San Antonio, TX) every 5 minutes during business hours (7am-9pm CT).
+Sends SMS alerts via Gmail SMTP → Verizon email-to-SMS gateway ONLY when
+new units appear.
 
 Designed to run as a GitHub Actions scheduled workflow.
 
@@ -16,22 +17,17 @@ Environment variables (set as GitHub Secrets):
 
 import json
 import os
-import re
 import smtplib
 import sys
 from datetime import datetime
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+import requests
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-FLOORPLAN_URLS = [
-    ("Brookhurst", "https://www.theatlee.com/floorplans/brookhurst"),
-    ("Grandview", "https://www.theatlee.com/floorplans/grandview"),
-]
+KNOCK_API_URL = "https://doorway-api.knockrentals.com/v1/property/2017939/units"
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_state.json")
 TIMEZONE = ZoneInfo("America/Chicago")
@@ -56,237 +52,31 @@ def is_business_hours():
 
 # ─── Fetch Availability ─────────────────────────────────────────────────────
 
-def fetch_availability():
+def fetch_2br_units():
     """
-    Load each floor plan page in a headless browser.
-    Two extraction strategies run in parallel:
-      1. Intercept API responses (JSON) returned by Apartments247
-      2. Parse the rendered HTML for unit data
-    Returns a list of unit dicts.
+    Call the Knock CRM API and return available 2-bedroom units.
+    Returns list of dicts with: id, name, bedrooms, bathrooms, area, price, available_on
     """
-    api_data = []
+    resp = requests.get(KNOCK_API_URL, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
 
-    def capture_response(response):
-        try:
-            ct = response.headers.get("content-type", "")
-            if "json" in ct:
-                body = response.json()
-                api_data.append({"url": response.url, "data": body})
-        except Exception:
-            pass
+    units = data.get("units_data", {}).get("units", [])
 
-    all_units = []
+    available_2br = []
+    for u in units:
+        if u.get("bedrooms") == 2 and u.get("available") is True:
+            available_2br.append({
+                "id": u["id"],
+                "name": u.get("name", ""),
+                "bedrooms": u.get("bedrooms"),
+                "bathrooms": u.get("bathrooms"),
+                "area": u.get("area"),
+                "price": u.get("displayPrice") or u.get("price", ""),
+                "available_on": u.get("availableOn", ""),
+            })
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page = context.new_page()
-        page.on("response", capture_response)
-
-        for plan_name, url in FLOORPLAN_URLS:
-            api_data.clear()
-
-            try:
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                page.wait_for_timeout(4000)  # let dynamic content settle
-            except Exception as e:
-                print(f"  Warning: failed to load {url}: {e}")
-                continue
-
-            # Strategy 1: Parse intercepted API JSON
-            for api in api_data:
-                all_units.extend(parse_api_response(api["data"], plan_name))
-
-            # Strategy 2: Parse rendered HTML
-            html = page.content()
-            all_units.extend(parse_html(html, plan_name))
-
-        browser.close()
-
-    # Deduplicate by unit ID
-    seen = set()
-    unique = []
-    for u in all_units:
-        if u["id"] not in seen:
-            seen.add(u["id"])
-            unique.append(u)
-
-    return unique
-
-
-# ─── API Response Parsing ────────────────────────────────────────────────────
-
-def parse_api_response(data, plan_name):
-    """
-    Extract 2BR unit info from a JSON API response.
-    Handles common Apartments247 / RentCafe / Yardi response shapes.
-    """
-    units = []
-    items = _extract_unit_list(data)
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        # Check bedroom count — try every common key name
-        beds = _get_first(item, [
-            "bedrooms", "beds", "Beds", "NumberOfBedrooms",
-            "BedroomCount", "bed_count", "numBedrooms",
-        ])
-        if str(beds).strip() not in ("2", "2.0"):
-            continue
-
-        unit_id = str(_get_first(item, [
-            "id", "unitId", "UnitId", "apartmentId", "ApartmentId",
-            "unit_id", "UnitNumber",
-        ]) or "")
-
-        unit = {
-            "id": unit_id or f"{plan_name}-{item.get('name', hash(str(item)))}",
-            "plan": plan_name,
-            "unit": str(_get_first(item, [
-                "unitName", "name", "UnitNumber", "ApartmentName",
-                "unit_name", "unit_number", "unitNumber",
-            ]) or ""),
-            "price": str(_get_first(item, [
-                "rent", "price", "MinimumRent", "Rent",
-                "monthlyRent", "effectiveRent", "min_rent",
-            ]) or ""),
-            "sqft": str(_get_first(item, [
-                "sqft", "squareFeet", "SQFT", "MaximumSQFT",
-                "square_feet", "area", "sqFt",
-            ]) or ""),
-            "available_date": str(_get_first(item, [
-                "availableDate", "moveInDate", "AvailableDate",
-                "MoveInDate", "available_date", "move_in_date",
-            ]) or ""),
-        }
-        units.append(unit)
-
-    return units
-
-
-def _extract_unit_list(data):
-    """Dig into a JSON blob and find the list of unit objects."""
-    if isinstance(data, list):
-        return data
-
-    if not isinstance(data, dict):
-        return []
-
-    # Direct unit arrays
-    for key in ("units", "availableUnits", "apartments", "results", "data"):
-        if key in data and isinstance(data[key], list):
-            return data[key]
-
-    # Nested: floorplans → units
-    for fp_key in ("floorplans", "floorPlans", "floor_plans"):
-        if fp_key in data and isinstance(data[fp_key], list):
-            items = []
-            for fp in data[fp_key]:
-                if isinstance(fp, dict):
-                    for u_key in ("units", "availableUnits", "apartments"):
-                        if u_key in fp and isinstance(fp[u_key], list):
-                            items.extend(fp[u_key])
-            if items:
-                return items
-
-    return []
-
-
-def _get_first(d, keys):
-    """Return the first matching key's value from a dict."""
-    for k in keys:
-        if k in d and d[k] not in (None, "", "null"):
-            return d[k]
-    return None
-
-
-# ─── HTML Parsing ────────────────────────────────────────────────────────────
-
-def parse_html(html, plan_name):
-    """
-    Extract unit info from the fully rendered HTML page.
-    Looks for common RentCafe / Apartments247 DOM patterns.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    units = []
-
-    # Try common CSS selectors for availability rows
-    selectors = [
-        ".availableUnitsRow",
-        ".unit-row",
-        ".available-unit",
-        "[data-unit-id]",
-        ".fp-unit",
-        "tr.unit",
-        ".unit-card",
-        ".apartment-card",
-        ".unit-item",
-        ".floorplan-unit",
-    ]
-
-    for selector in selectors:
-        for el in soup.select(selector):
-            unit = _parse_unit_element(el, plan_name)
-            if unit:
-                units.append(unit)
-
-    # Fallback: look for any container with price + date patterns
-    if not units:
-        for el in soup.find_all(["div", "tr", "li", "article"], recursive=True):
-            text = el.get_text(" ", strip=True)
-            # Only consider elements that look like unit listings
-            if re.search(r'\$[\d,]+', text) and len(text) < 500:
-                unit = _parse_unit_element(el, plan_name)
-                if unit:
-                    units.append(unit)
-
-    return units
-
-
-def _parse_unit_element(el, plan_name):
-    """Parse a single unit element from the DOM."""
-    text = el.get_text(" ", strip=True)
-    if not text:
-        return None
-
-    price_match = re.search(r'\$([\d,]+)', text)
-    price = price_match.group(0) if price_match else ""
-
-    date_match = re.search(
-        r'(\d{1,2}/\d{1,2}/\d{2,4}|\w+ \d{1,2},?\s*\d{4}|Available\s*Now)',
-        text, re.IGNORECASE
-    )
-    date = date_match.group(0) if date_match else ""
-
-    unit_match = re.search(r'(?:Unit|Apt|#)\s*(\S+)', text, re.IGNORECASE)
-    unit_num = unit_match.group(1) if unit_match else ""
-
-    sqft_match = re.search(r'([\d,]+)\s*(?:sq\.?\s*ft|SF)', text, re.IGNORECASE)
-    sqft = sqft_match.group(1) if sqft_match else ""
-
-    unit_id = el.get("data-unit-id", "") or el.get("id", "")
-    if not unit_id:
-        unit_id = f"{plan_name}-{unit_num or hash(text)}"
-
-    # Only return if we found at least some meaningful data
-    if price or date or unit_num:
-        return {
-            "id": str(unit_id),
-            "plan": plan_name,
-            "unit": unit_num,
-            "price": price,
-            "sqft": sqft,
-            "available_date": date,
-        }
-    return None
+    return available_2br
 
 
 # ─── State Management ────────────────────────────────────────────────────────
@@ -346,20 +136,26 @@ def main():
 
     # Business hours gate
     if not is_business_hours():
-        print(f"Outside business hours (7am–9pm CT). Exiting.")
+        print(f"Outside business hours (7am-9pm CT). Exiting.")
         return
 
     # Fetch current availability
-    print("Checking 2BR availability...")
-    current_units = fetch_availability()
-    print(f"Found {len(current_units)} 2BR unit(s)")
+    print("Checking 2BR availability via Knock API...")
+    try:
+        current_units = fetch_2br_units()
+    except Exception as e:
+        print(f"ERROR fetching availability: {e}")
+        sys.exit(1)
+
+    print(f"Found {len(current_units)} available 2BR unit(s)")
     for u in current_units:
-        print(f"  {u['plan']} | {u.get('unit', '?')} | {u.get('price', '?')} | {u.get('available_date', '?')}")
+        print(f"  Unit {u['name']} | {u['bedrooms']}bd/{u['bathrooms']}ba | "
+              f"{u['area']} sqft | ${u['price']}/mo | Available {u['available_on']}")
 
     # Load previous state
     previous = load_state()
 
-    # First run: just save state, don't alert (avoids false positive)
+    # First run: save baseline, don't alert (avoids false positive)
     if not previous.get("initialized"):
         print("First run — saving baseline state (no alert).")
         save_state(current_units)
@@ -372,19 +168,12 @@ def main():
     if new_units:
         print(f"NEW 2BR unit(s) found: {len(new_units)}")
 
-        # Build SMS message (keep it short — 160 char SMS limit per segment)
+        # Build SMS — keep it concise for the 160-char SMS segment limit
         lines = [f"NEW 2BR at The Atlee!"]
         for u in new_units:
-            parts = []
-            if u.get("plan"):
-                parts.append(u["plan"])
-            if u.get("unit"):
-                parts.append(f"#{u['unit']}")
-            if u.get("price"):
-                parts.append(u["price"])
-            if u.get("available_date"):
-                parts.append(u["available_date"])
-            lines.append(" | ".join(parts))
+            lines.append(
+                f"Unit {u['name']} | {u['area']}sf | ${u['price']}/mo | Avail {u['available_on']}"
+            )
         lines.append("theatlee.com/floorplans")
 
         message = "\n".join(lines)
