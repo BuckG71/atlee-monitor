@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+discovered_apis.json
+page_text_*.txt
+EOF
