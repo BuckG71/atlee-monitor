@@ -29,10 +29,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore state cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .state
-          key: monitor-state
+          key: monitor-state-${{ github.run_id }}
+          restore-keys: monitor-state-
 
       - name: Run availability check
         env:
@@ -43,3 +44,10 @@ jobs:
         run: |
           mkdir -p .state
           python monitor.py
+
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .state
+          key: monitor-state-${{ github.run_id }}
